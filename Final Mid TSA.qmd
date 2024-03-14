@@ -1,0 +1,466 @@
+---
+title: "Time Series, Midterm Presentation: \n Production planning and inventory management"
+author: "Sri Sai Pavan Varma Bhupathiraju, Kaveti Upender"
+format: revealjs
+editor: source
+toc: true
+toc-depth: 1
+slide-number: true
+smaller: false
+scrollable: true 
+execute:
+  echo: true
+editor_options: 
+  chunk_output_type: console
+---
+# Introduction
+
+To forecast production processes by analyzing historical trends in average weekly hours worked in the manufacturing sector (AWHMAN) and comparing them with average weekly hours of all employees (AWHAEGP).
+
+Average weekly hours relate to the average hours per worker for which pay was received and is different from standard or scheduled hours
+
+*   AWHMAN : Present in the life cycle of the product but not directly produce goods
+*   AWHAEGP: Employees producing goods
+
+## Dataset Source:
+
+*   https://fred.stlouisfed.org/series/AWHMAN
+
+*   https://fred.stlouisfed.org/series/AWHAEGP
+
+# Implementation
+
+## Libraries
+
+```{r}
+# Load necessary libraries
+library(reprex)
+library(fredr)
+library(zoo)
+library(ggplot2)
+library(changepoint) 
+library(imputeTS)
+library(forecast)
+library(bfast) 
+library(tsbox) 
+library(tseries)
+```
+
+## Loading Data
+
+```{r}
+# Set FRED API key
+fredr_set_key("ad8fa632ef9ee5e564d414be20b7766b")
+
+# Fetch datasets from FRED
+awhman <- fredr(series_id = "AWHMAN")
+awhaegp <- fredr(series_id = "AWHAEGP")
+
+# Convert dates to Date class
+awhman$date <- as.Date(awhman$date)
+awhaegp$date <- as.Date(awhaegp$date)
+```
+
+## Plots of the data
+
+```{r}
+# Plot individual datasets
+ggplot() +
+  geom_line(data = awhman, aes(x = date, y = value), color = "blue") +
+  labs(title = "AWHMAN Dataset", x = "Date", y = "Value") +
+  theme_minimal()
+```
+
+## Plots of the data
+
+```{r}
+ggplot() +
+  geom_line(data = awhaegp, aes(x = date, y = value), color = "red") +
+  labs(title = "AWHAEGP Dataset", x = "Date", y = "Value") +
+  theme_minimal()
+```
+
+## Facet Grid Plot
+
+```{r}
+# Determine the start date of the covariate dataset
+covariate_dataset_start_date <- min(awhaegp$date)
+
+# Subset the main dataset from the start date of the covariate dataset
+awhman_subset <- subset(awhman, date >= covariate_dataset_start_date)
+
+# Merge datasets
+merged_data <- merge(awhman_subset, awhaegp, by = "date", all = TRUE)
+```
+
+## Facet Grid Plot
+
+```{r}
+# Plot merged dataset with facet grid
+ggplot(merged_data, aes(x = date)) +  geom_line(aes(y = value.x, color = "AWHMAN")) +  geom_line(aes(y = value.y, color = "AWHAEGP")) +
+  labs(title = "Merged Dataset (AWHMAN and AWHAEGP)",       x = "Date", y = "Value", color = "Dataset") +  scale_color_manual(values = c("blue", "red")) +  theme_minimal() +  facet_grid(. ~ "Merged Dataset")
+```
+
+## ADF
+
+```{r}
+adf_result_value_x <- adf.test(merged_data$value.x, alternative = "stationary")
+print(adf_result_value_x)
+
+adf_result_value_y <- adf.test(merged_data$value.y, alternative = "stationary")
+print(adf_result_value_y)
+```
+
+## Seasonal decomposition
+
+```{r}
+decomposed <- decompose(ts(merged_data$value.y, frequency = 12), type = "multiplicative")
+trend <- decomposed$trend
+trend_df <- data.frame(date = time(trend), value = coredata(trend), component = "Trend")
+ggplot(trend_df, aes(x = date, y = value)) +  geom_line(color = "blue") +  labs(title = "Trend Component", x = "Date", y = "Value") +  theme_minimal()
+```
+
+## Seasonal decomposition
+
+```{r}
+seasonal <- decomposed$seasonal
+
+seasonal_df <- data.frame(date = time(seasonal), value = coredata(seasonal), component = "Seasonal")
+
+# Performing ADF for stationarity
+series_to_test <- merged_data$value.x
+seasonal_lag <- 12  # Common for monthly data with annual seasonality
+d <- 0  # Regular differencing
+D <- 0  # Seasonal differencing
+
+# Regular differencing loop
+repeat {
+  adf_test_result <- adf.test(series_to_test, alternative = "stationary")
+  
+  if (adf_test_result$p.value < 0.05 || d >= 2) {  # Adjust the limit as per your criteria
+    break
+  } else {
+    series_to_test <- diff(series_to_test, differences = 1)
+    d <- d + 1
+  }
+}
+
+# Check if further seasonal differencing is needed
+if (d <= 2) {  # Proceed only if we haven't excessively differenced
+  repeat {
+    adf_test_result <- adf.test(series_to_test, alternative = "stationary")
+    
+    if (adf_test_result$p.value < 0.05 || D >= 1) {  # Typically, D > 1 is rare
+      break
+    } else {
+      # Apply seasonal differencing
+      series_to_test <- diff(series_to_test, lag = seasonal_lag, differences = 1)
+      D <- D + 1
+    }
+  }
+}
+
+# Display the results
+cat("Regular Differencing (d):", d, "\n")
+cat("Seasonal Differencing (D) with lag", seasonal_lag, ":", D, "\n")
+```
+
+## Seasonal Plot
+
+```{r}
+# Plot seasonal component
+ggplot(seasonal_df, aes(x = date, y = value)) +
+  geom_line(color = "red") +
+  labs(title = "Seasonal Component", x = "Date", y = "Value") +
+  theme_minimal()
+```
+
+## ACF
+
+```{r}
+# ACF estimates
+acf_result <- acf(merged_data$value.y, plot = FALSE)
+lag_values <- c(1, 2, 3)
+acf_estimates <- acf_result$acf[lag_values]
+acf_result <- acf(merged_data$value.y, main = "Autocorrelation Function (ACF)")
+```
+
+## PACF
+
+```{r}
+# PACF estimates
+pacf_result <- pacf(merged_data$value.y, plot = FALSE)
+pacf_estimates <- pacf_result$acf[lag_values]
+pacf_result <- pacf(merged_data$value.y, main = "Partial Autocorrelation Function (PACF)")
+```
+
+## CCF
+
+```{r}
+# CCF estimates
+ccf_result <- ccf(merged_data$value.x, merged_data$value.y, plot = FALSE)
+ccf_estimates <- ccf_result$acf[lag_values]
+ccf_result <- ccf(merged_data$value.x, merged_data$value.y, main = "Cross-correlation Function (CCF)")
+```
+
+## ACF, PACF, and CCF
+
+```{r}
+# Print estimates
+cat("ACF estimates at lags", lag_values, ":", acf_estimates, "\n")
+cat("PACF estimates at lags", lag_values, ":", pacf_estimates, "\n")
+cat("CCF estimates at lags", lag_values, ":", ccf_estimates, "\n")
+```
+
+## Correlation Coefficients
+
+```{r}
+# Compute correlation coefficients
+correlation_coefficients <- cor(merged_data$value.x, merged_data$value.y)
+
+# Print correlation coefficients
+print(correlation_coefficients)
+```
+
+## Histogram and threshold
+
+```{r}
+hist(merged_data$value.x, probability = TRUE)
+curve(dnorm(x, mean = mean(merged_data$value.x), sd = sd(merged_data$value.x)),col = "red", lwd = 2, add = TRUE)
+mean_val <- mean(merged_data$value.x)
+std_val <- sd(merged_data$value.x)
+abline(v = mean_val - std_val, col = "blue", lty = 2)
+abline(v = mean_val + std_val, col = "blue", lty = 2)
+abline(v = mean_val - 2 * std_val, col = "green", lty = 2)
+abline(v = mean_val + 2 * std_val, col = "green", lty = 2)
+```
+
+## Sudden change
+
+```{r}
+# Check for sudden drops in dataset x
+threshold_x <- mean(merged_data$value.x) - (2 * sd(merged_data$value.x))
+for (i in 1:216) {
+    if (merged_data$value.x[i] - threshold_x < 0) {
+        combined_values <- paste("Date:", merged_data$date[i], "Index:", i)
+        print(combined_values)
+    }
+}
+```
+
+## Sudden change
+
+```{r}
+# from the output we assume
+recession_start_date <- "2008-12-01"
+recession_end_date <- "2009-09-01"
+covid_start_date <- "2020-04-01"
+covid_end_date <- "2020-06-01"
+```
+
+## Imputation
+
+```{r}
+# Create a new variable to store imputed values
+merged_data$value.y_imputed <- merged_data$value.y
+
+# Identify indices for recession and COVID periods
+recession_indices <- which(merged_data$date >= as.Date(recession_start_date) & merged_data$date <= as.Date(recession_end_date))
+
+covid_indices <- which(merged_data$date >= as.Date(covid_start_date) & merged_data$date <= as.Date(covid_end_date))
+
+# Impute missing values using state space model (Kalman Smoothing) within recession period
+merged_data$value.y_imputed[recession_indices] <- na_kalman(merged_data$value.y[recession_indices])
+
+# Impute missing values using state space model (Kalman Smoothing) within COVID period
+merged_data$value.y_imputed[covid_indices] <- na_kalman(merged_data$value.y[covid_indices])
+
+# Create a new variable to identify periods
+merged_data$period <- ifelse(merged_data$date >= as.Date(recession_start_date) & merged_data$date <= as.Date(recession_end_date), "Recession",
+                             ifelse(merged_data$date >= as.Date(covid_start_date) & merged_data$date <= as.Date(covid_end_date), "COVID", "Other"))
+```
+
+## Imputed plot
+
+```{r}
+# Plot original and imputed values within recession and COVID periods
+ggplot(merged_data, aes(x = date, color = period, linetype = period)) +  geom_line(aes(y = value.y_imputed), size = 1) +  geom_line(aes(y = value.y), linetype = "dashed", size = 1) +  labs(title = "Original vs. Imputed Values (Recession and COVID Periods)",       x = "Date", y = "Value", color = "Period", linetype = "Period") +  theme_minimal() +  scale_color_manual(values = c("Recession" = "red", "COVID" = "blue", "Other" = "black")) +   scale_linetype_manual(values = c("Recession" = "solid", "COVID" = "solid", "Other" = "dashed"))
+```
+
+## SARIMA model
+
+```{r}
+# Fit the SARIMA model
+sarima_model <- Arima(merged_data$value.y, order = c(0, 1, 0), seasonal = list(order = c(0, 1, 1), period = 12))
+# Diagnostic checks for SARIMA model
+sarima_residuals <- residuals(sarima_model)
+summary(sarima_model)
+summary(sarima_residuals)
+```
+
+## SARIMA model
+
+```{r}
+# Forecast using SARIMA model
+sarima_forecast <- forecast(sarima_model, h = 10)
+# Print the forecast
+print(sarima_forecast)
+```
+
+## SARIMA model
+
+```{r}
+autoplot(sarima_forecast)
+```
+
+## SARIMA model
+
+```{r}
+autoplot(sarima_forecast$mean)
+```
+
+## REGARIMA model
+
+```{r}
+# Fit the REGARIMA model
+regarima_model <- Arima(merged_data$value.y, order = c(1, 1, 2), seasonal = list(order = c(1, 1, 1), period = 12), xreg = merged_data$value.x)
+# Diagnostic checks for REGARIMA model
+regarima_residuals <- residuals(regarima_model)
+```
+
+## REGARIMA model
+
+```{r}
+summary(regarima_model)
+summary(regarima_residuals)
+```
+
+## REGARIMA model
+
+```{r}
+# Forecast using REGARIMA model
+regarima_forecast <- forecast(regarima_model, xreg = merged_data$value.x[1:10], h = 1)
+# Print the forecast
+print(regarima_forecast)
+```
+
+## REGARIMA model
+
+```{r}
+autoplot(regarima_forecast)
+```
+
+## REGARIMA model
+
+```{r}
+autoplot(regarima_forecast$mean)
+```
+
+## Plot of the forecasts
+```{r}
+future_times <- seq(as.Date("2024-01-01"), by="month", length.out=10)
+sarima_forecast_values <- rnorm(10, mean=20, sd=2)  # replace with your SARIMA forecast values
+regarima_forecast_values <- rnorm(10, mean=22, sd=2)  # replace with your REGARIMA forecast values
+forecast_df <- data.frame( Time = future_times, SARIMA = sarima_forecast$mean,REGARIMA = regarima_forecast$mean)
+ggplot(forecast_df, aes(x = Time)) +  geom_line(aes(y = SARIMA, color = "SARIMA")) +
+  geom_line(aes(y = REGARIMA, color = "REGARIMA")) +  labs(title = "Comparison of SARIMA and REGARIMA Forecast Values",
+       x = "Time", y = "Forecast Value") +  scale_color_manual(values = c("SARIMA" = "blue", "REGARIMA" = "red")) +  theme_minimal()
+```
+
+##  Forecasts using cross validation for multiple time horizons
+
+*   Cross-validation was performed to evaluate the performance of SARIMA and REGARIMA models across multiple time horizons.
+
+*   Various accuracy metrics, including Mean Absolute Error (MAE), Mean Squared Error (MSE), Root Mean Squared Error (RMSE), and Mean Absolute Percentage Error (MAPE), were computed to assess the predictive accuracy of the models.
+
+
+##  Forecasts using cross validation for multiple time horizons
+
+```{r}
+# Define time horizons
+horizons <- c(1, 3, 6, 12)
+
+# Initialize matrices to store accuracy metrics for SARIMA and REGARIMA models
+sarima_metrics <- matrix(NA, nrow = length(horizons), ncol = 4,
+                         dimnames = list(horizons, c("MAE", "MSE", "RMSE", "MAPE")))
+regarima_metrics <- matrix(NA, nrow = length(horizons), ncol = 4,
+                           dimnames = list(horizons, c("MAE", "MSE", "RMSE", "MAPE")))
+
+# Perform cross-validation for each time horizon
+for (i in 1:length(horizons)) {
+  horizon <- horizons[i]
+  # Split data into training and validation sets based on the current time horizon
+  training_data <- merged_data[1:(nrow(merged_data) - horizon), ]
+  validation_data <- merged_data[(nrow(merged_data) - horizon + 1):nrow(merged_data), ]
+  # Fit SARIMA model on training data
+  sarima_model <- Arima(training_data$value.y, order = c(0, 1, 0), seasonal = list(order = c(0, 1, 1), period = 12))
+  # Fit REGARIMA model on training data
+  regarima_model <- Arima(training_data$value.y, order = c(1, 1, 2),seasonal = list(order = c(1, 1, 1), period = 12), 
+                        xreg = training_data$value.x, method = "ML",  # Maximum Likelihood estimation
+                        optim.control = list(maxit = 1000))  # Increase max iterations
+  # Forecast using SARIMA model
+  sarima_forecast <- forecast(sarima_model, h = horizon)
+  # Forecast using REGARIMA model
+  regarima_forecast <- forecast(regarima_model, xreg = validation_data$value.x, h = horizon)
+  # Calculate accuracy metrics for SARIMA model
+  sarima_mae <- mean(abs(sarima_forecast$mean - validation_data$value.y))
+  sarima_mse <- mean((sarima_forecast$mean - validation_data$value.y)^2)
+  sarima_rmse <- sqrt(sarima_mse)
+  sarima_mape <- mean(abs((sarima_forecast$mean - validation_data$value.y) / validation_data$value.y) * 100)
+  # Calculate accuracy metrics for REGARIMA model
+  regarima_mae <- mean(abs(regarima_forecast$mean - validation_data$value.y))
+  regarima_mse <- mean((regarima_forecast$mean - validation_data$value.y)^2)
+  regarima_rmse <- sqrt(regarima_mse)
+  regarima_mape <- mean(abs((regarima_forecast$mean - validation_data$value.y) / validation_data$value.y) * 100)
+  # Store accuracy metrics in matrices
+  sarima_metrics[i, ] <- c(sarima_mae, sarima_mse, sarima_rmse, sarima_mape)
+  regarima_metrics[i, ] <- c(regarima_mae, regarima_mse, regarima_rmse, regarima_mape)
+}
+```
+
+##  Forecasts using cross validation for multiple time horizons
+
+```{r}
+# Print accuracy metrics for each model and each time horizon
+cat("SARIMA Metrics:\n")
+print(sarima_metrics)
+cat("\nREGARIMA Metrics:\n")
+print(regarima_metrics)
+```
+
+## SARIMA Metric Plots
+```{r}
+sarima_metrics <- data.frame(  MAE = c(0.3176195, 0.1804412, 0.1735991, 0.2698319),
+  MSE = c(0.10088213, 0.05215050, 0.05669376, 0.09414165),  RMSE = c(0.3176195, 0.2283648, 0.2381045, 0.3068251),  MAPE = c(0.8000491, 0.4569189, 0.4386709, 0.6792616),  lag = c(1, 3, 6, 12)
+)
+par(mfrow = c(2, 2))  # 2 rows, 2 columns
+for (metric in c("MAE", "MSE", "RMSE", "MAPE")) {
+  metric_values <- sarima_metrics[[metric]]
+  barplot(metric_values,names.arg = sarima_metrics$lag, xlab = "Lag", ylab = metric,  main = paste("Metric:", metric), col = "steelblue",ylim = c(0, max(metric_values) + 0.1)) 
+}
+```
+
+## REGARIMA Metric Plots
+```{r}
+regarima_metrics <- data.frame(  MAE = c(0.02609560, 0.06475416, 0.06507301, 0.13319307),  MSE = c(0.0006809804, 0.0071253347, 0.0049938682, 0.0220287677),  RMSE = c(0.02609560, 0.08441170, 0.07066731, 0.14842091),  MAPE = c(0.06573199, 0.16399612, 0.16391259, 0.33488203),  lag = c(1, 3, 6, 12)
+)
+par(mfrow = c(2, 2))  # 2 rows, 2 columns
+for (metric in c("MAE", "MSE", "RMSE", "MAPE")) {
+  metric_values <- regarima_metrics[[metric]]
+  barplot(metric_values,names.arg = regarima_metrics$lag, xlab = "Lag", ylab = metric,  main = paste("Metric:", metric), col = "steelblue",ylim = c(0, max(metric_values) + 0.1))  
+}
+```
+
+
+# Practical Implications
+
+*   Demand Forecasting : These models help manufacturers predict future demand for their products, allowing for more efficient production planning and inventory management.
+*   ⁠Resource Allocation: With forecasting capabilities, REGARIMA and SARIMA models assist in optimizing resource allocation within production facilities.
+
+# Conclusion
+
+*   Both SARIMA and REGARIMA models demonstrated reasonable forecasting accuracy, with REGARIMA leveraging additional covariate information for improved predictions.
+
+*   In summary, the predicted average hours help ensure that enough employees are available to meet production needs. By using REGARIMA and SARIMA models, companies can plan "staffing levels accurately, preventing shortages and maximizing productivity". This proactive approach supports efficient resource management and ensures timely delivery of goods.
+
+##    Thank you....
